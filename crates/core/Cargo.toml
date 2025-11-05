@@ -1,0 +1,24 @@
+[package]
+name = "tui18-core"
+version = "0.1.0"
+edition = "2021"
+authors = ["Gustav Ruthgård <gustav@ruthgard.org>"]
+license = "MIT"
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+tokio.workspace = true
+reqwest.workspace = true
+notify.workspace = true
+parking_lot.workspace = true
+tracing.workspace = true
+config.workspace = true
+dirs.workspace = true
+regex.workspace = true
+walkdir.workspace = true
+once_cell.workspace = true
+tempfile.workspace = true

@@ -1,0 +1,25 @@
+[package]
+name = "tui18-tui"
+version = "0.1.0"
+edition = "2021"
+authors = ["Gustav Ruthgård <gustav@ruthgard.org>"]
+license = "MIT"
+
+[[bin]]
+name = "tui18"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+ratatui.workspace = true
+crossterm.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+parking_lot.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+log.workspace = true
+once_cell.workspace = true
+tui18-core = { path = "../core" }
