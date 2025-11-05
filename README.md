@@ -1,33 +1,55 @@
-# 18TUI (Rust Port Scaffolding)
+# 18TUI (Rust)
 
-This workspace hosts the Rust rewrite of the 18xx metadata terminal UI. It mirrors the structure of the existing Ruby implementation while leaving space to flesh out the internals step by step.
+18TUI is a Rust rewrite of the 18xx metadata terminal UI. The goal is to reproduce the feature set of the original Ruby application while taking advantage of Rust’s safety guarantees and ecosystem.
 
-## Workspace Layout
+## Status
 
-- `crates/core` – configuration, resource syncing, game metadata models, and save-file scaffolding.
-- `crates/tui` – binary crate that will host the ratatui-based interface (currently prints a simple placeholder message).
+- ✅ Workspace wiring, configuration bootstrap, and placeholder UI binary
+- 🚧 Resource parsing, compatibility filtering, and ratatui interface
+- 📋 Roadmap tracked in this README until an issue tracker is in place
 
-## Getting Started
+## Requirements
+
+- Rust toolchain (via [rustup](https://rustup.rs/))
+- `cargo` (installed with Rust)
+- Optional: Node.js 18+ for any JS-based tooling in `package.json`
+
+## Quick Start
 
 ```bash
 cargo check
 cargo run -p tui18-tui
 ```
 
-The binary presently ensures configuration defaults exist, prepares the engine repository checkout, and prints a stub message with the number of discovered games (empty until the loader is implemented).
+The binary ensures configuration defaults exist, syncs the engine repository checkout, and prints a stub message indicating the number of games discovered (currently zero until the loader is implemented).
 
-## Roadmap (High Level)
+## Workspace Layout
 
-1. Port resource discovery (`meta.rb` parsing) into `tui18-core::resource::loader`.
-2. Mirror the Ruby session models (corporations, trains, market cells) in Rust data structures.
-3. Implement the ratatui UI with panels, key handling, and banner rendering.
-4. Recreate save/load logic and compatibility filtering in Rust.
-5. Add automated tests plus smoke tests to validate parity with the Ruby version.
+- `crates/core` – configuration, resource syncing, game metadata models, and save-file scaffolding
+- `crates/tui` – binary crate hosting the ratatui-based interface shell
+- `logs/` – runtime log output (ignored from source control)
 
-## Notes
+## Development Notes
 
-- The project leans on the same crate stack as `gitparadice`/`cerTUI` (`ratatui`, `crossterm`, `tokio`, etc.).
-- `ResourceSync` currently shells out to `git`; consider swapping to `git2` if tighter integration is needed.
-- `ResourceLoader` returns an empty list until the parsing logic is completed.
+- `ResourceSync` shells out to `git`; consider migrating to `git2` if tighter integration or better error handling is required.
+- `ResourceLoader` currently returns an empty collection; the Ruby metadata parser has not yet been ported.
+- Tests live alongside the crates they target (`crates/*/tests`). Add integration smoke tests as the Rust parity grows.
 
-Happy porting!
+## Roadmap
+
+1. Port resource discovery (`meta.rb`) into `tui18-core::resource::loader`.
+2. Mirror Ruby session models (corporations, trains, market cells) in Rust.
+3. Flesh out ratatui panels, key bindings, and banner rendering.
+4. Recreate save/load logic plus compatibility filtering in Rust.
+5. Add automated parity tests and CI smoke runs.
+
+## Contributing
+
+1. Fork the repository and clone your copy.
+2. Create a feature branch: `git checkout -b feature/thing`.
+3. Run `cargo fmt`, `cargo clippy`, and `cargo test` before submitting PRs.
+4. Open a pull request with a clear summary of changes and testing notes.
+
+## License
+
+This project is licensed under the [MIT License](LICENSE).
