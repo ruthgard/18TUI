@@ -23,3 +23,4 @@ tracing-subscriber.workspace = true
 log.workspace = true
 once_cell.workspace = true
 tui18-core = { path = "../core" }
+dirs.workspace = true

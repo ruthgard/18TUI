@@ -1,4 +1,4 @@
-use std::{cmp, collections::HashMap, io, thread, time::Duration};
+use std::{cmp, collections::HashMap, env, fs, io, path::PathBuf, thread, time::Duration};
 
 use anyhow::{anyhow, Context, Result};
 use chrono::Local;
@@ -34,6 +34,263 @@ use crate::block_font;
 
 const TICK_RATE: Duration = Duration::from_millis(250);
 const MAX_SAVE_NAME_LEN: usize = 64;
+
+#[derive(Debug, Clone)]
+struct Theme {
+    primary_bg: Color,
+    primary_fg: Color,
+    accent: Color,
+    accent_alt: Color,
+    muted: Color,
+    selection_bg: Color,
+    selection_fg: Color,
+    success: Color,
+    warning: Color,
+    danger: Color,
+    on_accent: Color,
+}
+
+impl Default for Theme {
+    fn default() -> Self {
+        Self {
+            primary_bg: Color::Black,
+            primary_fg: Color::White,
+            accent: Color::Cyan,
+            accent_alt: Color::Blue,
+            muted: Color::DarkGray,
+            selection_bg: Color::DarkGray,
+            selection_fg: Color::White,
+            success: Color::Green,
+            warning: Color::Yellow,
+            danger: Color::Red,
+            on_accent: Color::Black,
+        }
+    }
+}
+
+fn load_theme() -> (Theme, String) {
+    let mut theme = Theme::default();
+    let candidates = omarchy_theme_candidates();
+    let path = match candidates.into_iter().find(|candidate| candidate.exists()) {
+        Some(path) => path,
+        None => {
+            return (
+                theme,
+                "Omarchy theme not found; using default palette.".to_string(),
+            )
+        }
+    };
+
+    let data = match fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(err) => {
+            return (
+                theme,
+                format!(
+                    "Failed to read {} ({err}); using default palette.",
+                    path.display()
+                ),
+            )
+        }
+    };
+
+    let json: Value = match serde_json::from_str(&data) {
+        Ok(value) => value,
+        Err(err) => {
+            return (
+                theme,
+                format!(
+                    "Failed to parse {} ({err}); using default palette.",
+                    path.display()
+                ),
+            )
+        }
+    };
+
+    let mut applied: Vec<&str> = Vec::new();
+
+    if let Some(color) = color_at_path(&json, &["colors", "primary", "background"])
+        .or_else(|| color_at_path(&json, &["apps", "alacritty", "colors", "primary", "background"]))
+    {
+        theme.primary_bg = color;
+        applied.push("primary.background");
+    }
+
+    if let Some(color) = color_at_path(&json, &["colors", "primary", "foreground"])
+        .or_else(|| color_at_path(&json, &["apps", "alacritty", "colors", "primary", "foreground"]))
+    {
+        theme.primary_fg = color;
+        applied.push("primary.foreground");
+    }
+
+    if let Some(color) =
+        color_at_path(&json, &["colors", "primary", "dim_foreground"])
+            .or_else(|| {
+                color_at_path(
+                    &json,
+                    &["apps", "alacritty", "colors", "primary", "dim_foreground"],
+                )
+            })
+    {
+        theme.muted = color;
+        applied.push("primary.dim_foreground");
+    }
+
+    if let Some(color) = color_at_path(&json, &["colors", "terminal", "cyan"]) {
+        theme.accent = color;
+        applied.push("terminal.cyan");
+    }
+
+    if let Some(color) = color_at_path(&json, &["colors", "terminal", "blue"])
+        .or_else(|| color_at_path(&json, &["colors", "terminal", "magenta"]))
+    {
+        theme.accent_alt = color;
+        applied.push("terminal.blue");
+    }
+
+    if let Some(color) = color_at_path(&json, &["colors", "terminal", "green"]) {
+        theme.success = color;
+        applied.push("terminal.green");
+    }
+
+    if let Some(color) = color_at_path(&json, &["colors", "terminal", "yellow"]) {
+        theme.warning = color;
+        applied.push("terminal.yellow");
+    }
+
+    if let Some(color) = color_at_path(&json, &["colors", "terminal", "red"]) {
+        theme.danger = color;
+        applied.push("terminal.red");
+    }
+
+    if let Some(color) = color_at_path(
+        &json,
+        &["apps", "alacritty", "colors", "selection", "background"],
+    ) {
+        theme.selection_bg = color;
+        applied.push("selection.background");
+    }
+
+    if let Some(color) = color_at_path(
+        &json,
+        &["apps", "alacritty", "colors", "selection", "foreground"],
+    ) {
+        theme.selection_fg = color;
+        applied.push("selection.foreground");
+    }
+
+    theme.on_accent = contrast_color(&theme.accent, Color::Black);
+    if applied.iter().all(|entry| *entry != "selection.foreground") {
+        theme.selection_fg = contrast_color(&theme.selection_bg, theme.selection_fg);
+    }
+
+    let summary = if applied.is_empty() {
+        format!(
+            "Loaded Omarchy theme from {} but no recognized color keys were applied.",
+            path.display()
+        )
+    } else {
+        format!(
+            "Loaded Omarchy theme from {} (applied {}).",
+            path.display(),
+            applied.join(", ")
+        )
+    };
+
+    (theme, summary)
+}
+
+fn omarchy_theme_candidates() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Ok(xdg) = env::var("XDG_CONFIG_HOME") {
+        let base = PathBuf::from(&xdg).join("omarchy");
+        candidates.push(base.join("theme.json"));
+        candidates.push(base.join("current").join("theme.json"));
+        candidates.push(base.join("current").join("theme").join("custom_theme.json"));
+    }
+    if let Ok(home) = env::var("HOME") {
+        let base = PathBuf::from(home).join(".config").join("omarchy");
+        candidates.push(base.join("theme.json"));
+        candidates.push(base.join("current").join("theme.json"));
+        candidates.push(base.join("current").join("theme").join("custom_theme.json"));
+    }
+    if let Some(dir) = dirs::config_dir() {
+        candidates.push(dir.join("omarchy").join("theme.json"));
+        candidates.push(dir.join("omarchy").join("current").join("theme.json"));
+        candidates.push(
+            dir.join("omarchy")
+                .join("current")
+                .join("theme")
+                .join("custom_theme.json"),
+        );
+    }
+    candidates.push(PathBuf::from("/etc/xdg/omarchy/theme.json"));
+    candidates.push(PathBuf::from("/etc/xdg/omarchy/current/theme.json"));
+    candidates.push(PathBuf::from("/etc/xdg/omarchy/current/theme/custom_theme.json"));
+    candidates
+}
+
+fn color_at_path(value: &Value, path: &[&str]) -> Option<Color> {
+    let mut current = value;
+    for key in path {
+        current = current.get(*key)?;
+    }
+    value_to_color(current)
+}
+
+fn value_to_color(value: &Value) -> Option<Color> {
+    match value {
+        Value::String(text) => parse_hex_color(text),
+        Value::Array(items) if items.len() >= 3 => {
+            let mut rgb = [0u8; 3];
+            for (idx, component) in items.iter().take(3).enumerate() {
+                if let Some(val) = component.as_u64() {
+                    if val <= 255 {
+                        rgb[idx] = val as u8;
+                    }
+                }
+            }
+            Some(Color::Rgb(rgb[0], rgb[1], rgb[2]))
+        }
+        _ => None,
+    }
+}
+
+fn parse_hex_color(input: &str) -> Option<Color> {
+    let trimmed = input.trim();
+    let hex = trimmed.strip_prefix('#').unwrap_or(trimmed);
+    let hex = hex.strip_prefix("0x").unwrap_or(hex);
+    match hex.len() {
+        6 => {
+            let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
+            let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
+            let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+            Some(Color::Rgb(r, g, b))
+        }
+        3 => {
+            let r = u8::from_str_radix(&hex[0..1].repeat(2), 16).ok()?;
+            let g = u8::from_str_radix(&hex[1..2].repeat(2), 16).ok()?;
+            let b = u8::from_str_radix(&hex[2..3].repeat(2), 16).ok()?;
+            Some(Color::Rgb(r, g, b))
+        }
+        _ => None,
+    }
+}
+
+fn contrast_color(color: &Color, fallback: Color) -> Color {
+    match color {
+        Color::Rgb(r, g, b) => {
+            let luminance =
+                0.299 * f64::from(*r) + 0.587 * f64::from(*g) + 0.114 * f64::from(*b);
+            if luminance > 186.0 {
+                Color::Black
+            } else {
+                Color::White
+            }
+        }
+        _ => fallback,
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Mode {
@@ -356,6 +613,8 @@ pub struct Tui18App {
     pending_save_name: Option<String>,
     pending_save_state: Option<Value>,
     active_save: Option<SaveEntry>,
+    theme: Theme,
+    theme_status: Option<String>,
 }
 
 impl Tui18App {
@@ -364,6 +623,7 @@ impl Tui18App {
         metadata: ResourceMetadata,
         session_loader: SessionLoader,
     ) -> Self {
+        let (theme, theme_status) = load_theme();
         Self {
             loader,
             metadata,
@@ -381,13 +641,19 @@ impl Tui18App {
             pending_save_name: None,
             pending_save_state: None,
             active_save: None,
+            theme,
+            theme_status: Some(theme_status),
         }
     }
 
     pub async fn run(&mut self) -> Result<()> {
         self.reload_games()?;
-        self.state
-            .set_status(format!("Loaded {} games", self.state.filtered.len()));
+        let mut status = format!("Loaded {} games", self.state.filtered.len());
+        if let Some(note) = self.theme_status.as_ref() {
+            status.push_str(" • ");
+            status.push_str(note);
+        }
+        self.state.set_status(status);
         if let Err(err) = self.refresh_saves() {
             self.state
                 .set_status(format!("Failed to load saves: {err}"));
@@ -1268,6 +1534,7 @@ impl Tui18App {
     }
 
     fn handle_play_idle_key(&mut self, state: &mut PlayState, key: KeyEvent) -> Result<()> {
+        let mut hide_banner = false;
         match key.code {
             KeyCode::Esc => {
                 if let Err(err) = self.persist_active_session(state) {
@@ -1285,10 +1552,12 @@ impl Tui18App {
             }
             KeyCode::Char('q') if key.modifiers.is_empty() => {
                 self.state.should_quit = true;
+                hide_banner = true;
             }
             KeyCode::Char('j') | KeyCode::Char('J') | KeyCode::Down => {
                 if state.revenue_view_enabled() {
                     state.move_revenue_cursor(1, 0);
+                    hide_banner = true;
                 } else {
                     state.move_corporation(1);
                 }
@@ -1296,6 +1565,7 @@ impl Tui18App {
             KeyCode::Char('k') | KeyCode::Char('K') | KeyCode::Up => {
                 if state.revenue_view_enabled() {
                     state.move_revenue_cursor(-1, 0);
+                    hide_banner = true;
                 } else {
                     state.move_corporation(-1);
                 }
@@ -1303,11 +1573,13 @@ impl Tui18App {
             KeyCode::Char('h') | KeyCode::Char('H') | KeyCode::Left => {
                 if state.revenue_view_enabled() {
                     state.move_revenue_cursor(0, -1);
+                    hide_banner = true;
                 }
             }
             KeyCode::Char('l') | KeyCode::Char('L') | KeyCode::Right => {
                 if state.revenue_view_enabled() {
                     state.move_revenue_cursor(0, 1);
+                    hide_banner = true;
                 }
             }
             KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::PageDown => {
@@ -1317,6 +1589,7 @@ impl Tui18App {
             KeyCode::Char('/') => {
                 self.state
                     .set_status("Filtering not available in play screen".to_string());
+                hide_banner = true;
             }
             KeyCode::Char('m') | KeyCode::Char('M') => {
                 let enabled = state.toggle_revenue_view();
@@ -1326,6 +1599,7 @@ impl Tui18App {
                     "Stock market view enabled"
                 };
                 self.state.set_status(message.to_string());
+                hide_banner = true;
             }
             KeyCode::Char('.') | KeyCode::Char('>') => {
                 if state.advance_operating_round() {
@@ -1335,6 +1609,7 @@ impl Tui18App {
                     self.state
                         .set_status("Already at final operating round".to_string());
                 }
+                hide_banner = true;
             }
             KeyCode::Char(',') | KeyCode::Char('<') => {
                 if state.retreat_operating_round() {
@@ -1344,6 +1619,7 @@ impl Tui18App {
                     self.state
                         .set_status("Already at first operating round".to_string());
                 }
+                hide_banner = true;
             }
             KeyCode::Char('[') => {
                 if state.phase_count() == 0 {
@@ -1358,6 +1634,7 @@ impl Tui18App {
                         self.state.set_status("Already at first phase".to_string());
                     }
                 }
+                hide_banner = true;
             }
             KeyCode::Char(']') => {
                 if state.phase_count() == 0 {
@@ -1372,6 +1649,7 @@ impl Tui18App {
                         self.state.set_status("Already at final phase".to_string());
                     }
                 }
+                hide_banner = true;
             }
             KeyCode::Char('a') | KeyCode::Char('A') => {
                 if state.session.corporations.is_empty() {
@@ -1383,6 +1661,7 @@ impl Tui18App {
                     self.state
                         .set_status(format!("Added operating round {label}"));
                 }
+                hide_banner = true;
             }
             KeyCode::Char('+') | KeyCode::Char('=') => {
                 if state.revenue_view_enabled() {
@@ -1396,6 +1675,7 @@ impl Tui18App {
                             format_currency(value)
                         ));
                     }
+                    hide_banner = true;
                 }
             }
             KeyCode::Char('-') => {
@@ -1410,6 +1690,7 @@ impl Tui18App {
                             format_currency(value)
                         ));
                     }
+                    hide_banner = true;
                 }
             }
             KeyCode::Char('0') => {
@@ -1422,6 +1703,7 @@ impl Tui18App {
                             format!("OR{}", or_idx + 1)
                         ));
                     }
+                    hide_banner = true;
                 }
             }
             KeyCode::Char(c) if ('1'..='6').contains(&c) => {
@@ -1440,13 +1722,16 @@ impl Tui18App {
                             ));
                         }
                     }
+                    hide_banner = true;
                 }
             }
             KeyCode::Char('p') | KeyCode::Char('P') => {
                 self.begin_par_selection(state);
+                hide_banner = true;
             }
             KeyCode::Char('t') | KeyCode::Char('T') => {
                 self.begin_train_mode(state);
+                hide_banner = true;
             }
             KeyCode::Enter => {
                 if let Some(corp) = state.current_corporation() {
@@ -1458,8 +1743,12 @@ impl Tui18App {
                 } else {
                     self.state.set_status("No corporation selected".to_string());
                 }
+                hide_banner = true;
             }
             _ => {}
+        }
+        if hide_banner {
+            state.consume_title_banner();
         }
         Ok(())
     }
@@ -1740,37 +2029,62 @@ impl Tui18App {
 
     fn draw_menu(&mut self, frame: &mut Frame) {
         let area = frame.size();
-        let chunks = Layout::default()
+        let banner_lines = block_font::render("18TUI");
+        let banner_height = banner_lines.len() as u16;
+        let layout = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Min(5), Constraint::Length(3)])
+            .constraints([
+                Constraint::Length((banner_height + 2).min(area.height)),
+                Constraint::Min(3),
+            ])
             .split(area);
-        let menu_area = chunks[0];
-        let status_area = chunks[1];
-        let menu_items = ["New Game", "Continue", "Quit"];
 
-        let block = Block::default().borders(Borders::ALL).title("18TUI");
-
-        let mut items = Vec::new();
-        for (idx, item) in menu_items.iter().enumerate() {
-            let span = if idx == self.state.menu_cursor {
-                Span::styled(
-                    format!("▶ {item}"),
+        let banner_content: Vec<Line> = banner_lines
+            .into_iter()
+            .map(|line| {
+                Line::from(Span::styled(
+                    line,
                     Style::default()
-                        .fg(Color::Cyan)
+                        .fg(self.theme.accent)
                         .add_modifier(Modifier::BOLD),
-                )
-            } else {
-                Span::raw(format!("  {item}"))
-            };
-            items.push(ListItem::new(Line::from(span)));
-        }
+                ))
+            })
+            .collect();
+        let banner = Paragraph::new(banner_content).alignment(Alignment::Center);
+        frame.render_widget(banner, layout[0]);
 
-        let list = List::new(items)
-            .block(block)
-            .highlight_style(Style::default().bg(Color::DarkGray));
+        let menu_items = ["New Game", "Continue", "Quit"];
+        let menu_height = (menu_items.len() as u16)
+            .saturating_mul(2)
+            .saturating_add(2)
+            .min(layout[1].height);
+        let menu_width = 28.min(layout[1].width.max(1));
+        let menu_area = centered_rect(menu_width, menu_height, layout[1]);
 
-        frame.render_widget(list, menu_area);
-        self.render_status(frame, status_area);
+        let menu_lines: Vec<Line> = menu_items
+            .iter()
+            .enumerate()
+            .map(|(idx, item)| {
+                if idx == self.state.menu_cursor {
+                    Line::from(Span::styled(
+                        format!("▶ {item}"),
+                        Style::default()
+                            .fg(self.theme.accent)
+                            .add_modifier(Modifier::BOLD),
+                    ))
+                } else {
+                    Line::from(Span::styled(
+                        format!("  {item}"),
+                        Style::default().fg(self.theme.primary_fg),
+                    ))
+                }
+            })
+            .collect();
+
+        let menu = Paragraph::new(menu_lines)
+            .block(Block::default().borders(Borders::ALL).title("Menu"))
+            .alignment(Alignment::Center);
+        frame.render_widget(menu, menu_area);
     }
 
     fn draw_browse(&mut self, frame: &mut Frame) {
@@ -1850,7 +2164,7 @@ impl Tui18App {
             {
                 let absolute_idx = self.state.continue_offset + idx;
                 let marker = if absolute_idx == self.state.continue_cursor {
-                    Span::styled("▶ ", Style::default().fg(Color::Cyan))
+                    Span::styled("▶ ", Style::default().fg(self.theme.accent))
                 } else {
                     Span::raw("  ")
                 };
@@ -1868,7 +2182,7 @@ impl Tui18App {
             .title("Continue Game");
         let list = List::new(items)
             .block(block)
-            .highlight_style(Style::default().bg(Color::DarkGray));
+            .highlight_style(Style::default().bg(self.theme.selection_bg));
 
         frame.render_stateful_widget(list, list_area, &mut list_state);
         self.render_status(frame, status_area);
@@ -1896,7 +2210,7 @@ impl Tui18App {
                 .split(rows[1]);
 
             if let Some(state) = self.play_state.as_mut() {
-                Self::render_play_market(frame, top[1], state);
+                Self::render_play_market(&self.theme, frame, top[1], state);
             }
 
             if let Some(state) = self.play_state.as_ref() {
@@ -1908,7 +2222,7 @@ impl Tui18App {
 
             if let Some(state) = self.play_state.as_mut() {
                 if state.is_purchase_modal_active() {
-                    Self::render_train_purchase_modal(frame, area, state);
+                    Self::render_train_purchase_modal(&self.theme, frame, area, state);
                 }
             }
         } else {
@@ -1940,7 +2254,7 @@ impl Tui18App {
         let title = format!("New Game - {}", prompt.game.title);
         let instruction = format!("Save name for {}", prompt.game.title);
         let input_line = Line::from(vec![
-            Span::styled("> ", Style::default().fg(Color::Cyan)),
+            Span::styled("> ", Style::default().fg(self.theme.accent)),
             Span::raw(prompt.input.clone()),
         ]);
         let helper = Line::from(vec![
@@ -1995,7 +2309,7 @@ impl Tui18App {
                     Span::styled(
                         "▶ ",
                         Style::default()
-                            .fg(Color::Cyan)
+                            .fg(self.theme.accent)
                             .add_modifier(Modifier::BOLD),
                     )
                 } else {
@@ -2004,11 +2318,14 @@ impl Tui18App {
                 let title = Span::styled(
                     game.title.clone(),
                     Style::default()
-                        .fg(Color::White)
+                        .fg(self.theme.primary_fg)
                         .add_modifier(Modifier::BOLD),
                 );
                 let subtitle = game.subtitle.as_ref().map(|s| {
-                    Span::styled(format!(" · {}", s), Style::default().fg(Color::DarkGray))
+                    Span::styled(
+                        format!(" · {}", s),
+                        Style::default().fg(self.theme.muted),
+                    )
                 });
                 let mut line = vec![marker, title];
                 if let Some(sub) = subtitle {
@@ -2021,7 +2338,7 @@ impl Tui18App {
         let block = Block::default().borders(Borders::ALL).title("Games");
         let list = List::new(items)
             .block(block)
-            .highlight_style(Style::default().bg(Color::DarkGray));
+            .highlight_style(Style::default().bg(self.theme.selection_bg));
         frame.render_stateful_widget(list, area, &mut list_state);
     }
 
@@ -2036,7 +2353,7 @@ impl Tui18App {
             if let Some(subtitle) = &game.subtitle {
                 lines.push(Line::from(Span::styled(
                     subtitle.clone(),
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(self.theme.muted),
                 )));
             }
             if let Some(designer) = &game.designer {
@@ -2095,13 +2412,13 @@ impl Tui18App {
                 let mut spans = vec![Span::styled(
                     format!("{:>3}", corp.sym),
                     Style::default()
-                        .fg(Color::Cyan)
+                        .fg(self.theme.accent)
                         .add_modifier(Modifier::BOLD),
                 )];
                 spans.push(Span::raw(" "));
                 spans.push(Span::styled(
                     corp.name.clone(),
-                    Style::default().fg(Color::White),
+                    Style::default().fg(self.theme.primary_fg),
                 ));
                 spans.push(Span::raw(format!("  P:{par_text:<4}")));
                 spans.push(Span::raw(format!(" M:{market_text:<4}")));
@@ -2116,14 +2433,19 @@ impl Tui18App {
 
         let list = List::new(items)
             .block(block)
-            .highlight_style(Style::default().bg(Color::DarkGray))
+            .highlight_style(Style::default().bg(self.theme.selection_bg))
             .highlight_symbol("▶ ");
         frame.render_stateful_widget(list, area, &mut list_state);
     }
 
-    fn render_play_market(frame: &mut Frame, area: Rect, state: &mut PlayState) {
+    fn render_play_market(theme: &Theme, frame: &mut Frame, area: Rect, state: &mut PlayState) {
+        if state.should_show_title_banner() {
+            Self::render_play_title_banner(theme, frame, area, state);
+            return;
+        }
+
         if state.revenue_view_enabled() {
-            Self::render_revenue_panel(frame, area, state);
+            Self::render_revenue_panel(theme, frame, area, state);
             return;
         }
 
@@ -2188,13 +2510,13 @@ impl Tui18App {
                         continue;
                     }
                     let is_par_cell = state.is_par_cell(row_idx, col_idx);
-                    let mut style = Style::default().fg(market_color(raw));
+                    let mut style = Style::default().fg(market_color(raw, theme));
                     if play_mode == PlayMode::ParSelect && !is_par_cell {
                         style = style.add_modifier(Modifier::DIM);
                     }
                     if let Some(pos) = &corp_position {
                         if pos.row == row_idx && pos.col == col_idx {
-                            style = style.fg(Color::Green).add_modifier(Modifier::BOLD);
+                            style = style.fg(theme.success).add_modifier(Modifier::BOLD);
                         }
                     }
                     if is_par_cell && play_mode == PlayMode::ParSelect {
@@ -2202,8 +2524,8 @@ impl Tui18App {
                     }
                     if play_mode != PlayMode::Idle && cursor == (row_idx, col_idx) {
                         style = style
-                            .fg(Color::Black)
-                            .bg(Color::Cyan)
+                            .fg(theme.on_accent)
+                            .bg(theme.accent)
                             .add_modifier(Modifier::BOLD);
                     }
 
@@ -2256,7 +2578,12 @@ impl Tui18App {
         frame.render_widget(paragraph, area);
     }
 
-    fn render_revenue_panel(frame: &mut Frame, area: Rect, state: &mut PlayState) {
+    fn render_revenue_panel(
+        theme: &Theme,
+        frame: &mut Frame,
+        area: Rect,
+        state: &mut PlayState,
+    ) {
         let phase_label = state.phase_label();
         state.ensure_phase_round_capacity(state.current_phase_index());
         let summary = state.operating_round_summary();
@@ -2365,7 +2692,7 @@ impl Tui18App {
             let mut spans = Vec::new();
             let mut corp_style = Style::default().add_modifier(Modifier::BOLD);
             if is_active_row {
-                corp_style = corp_style.fg(Color::Cyan);
+                corp_style = corp_style.fg(theme.accent);
             }
             spans.push(Span::styled(
                 format!(
@@ -2390,11 +2717,11 @@ impl Tui18App {
                 let mut style = Style::default();
                 if row_idx == state.revenue_cursor_corp && col_idx == state.revenue_cursor_or {
                     style = style
-                        .bg(Color::Cyan)
-                        .fg(Color::Black)
+                        .bg(theme.accent)
+                        .fg(theme.on_accent)
                         .add_modifier(Modifier::BOLD);
                 } else if row_idx == state.revenue_cursor_corp {
-                    style = style.fg(Color::Cyan);
+                    style = style.fg(theme.accent);
                 }
                 let cell = format!("{:^width$}", text, width = col_width);
                 spans.push(Span::styled(cell, style));
@@ -2429,7 +2756,7 @@ impl Tui18App {
                 let mut style = Style::default();
                 if base_value != 0 && active_value == computed {
                     style = style
-                        .fg(Color::Yellow)
+                        .fg(theme.warning)
                         .add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
                 }
                 spans.push(Span::styled(label, style));
@@ -2467,6 +2794,44 @@ impl Tui18App {
         let paragraph = Paragraph::new(lines)
             .block(block)
             .wrap(Wrap { trim: false });
+        frame.render_widget(paragraph, area);
+    }
+
+    fn render_play_title_banner(theme: &Theme, frame: &mut Frame, area: Rect, state: &PlayState) {
+        let block = Block::default().borders(Borders::ALL).title("Stock Market");
+        let banner_lines = block_font::render(&state.session.info.title);
+        let styled_lines: Vec<Line> = banner_lines
+            .into_iter()
+            .map(|line| {
+                Line::from(Span::styled(
+                    line,
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD),
+                ))
+            })
+            .collect();
+
+        let inner_height = area.height.saturating_sub(2) as usize;
+        let mut content: Vec<Line> = Vec::new();
+        if inner_height > 0 {
+            let padding = inner_height.saturating_sub(styled_lines.len());
+            let top_padding = padding / 2;
+            for _ in 0..top_padding {
+                content.push(Line::from(String::new()));
+            }
+            content.extend(styled_lines.iter().cloned());
+            while content.len() < inner_height {
+                content.push(Line::from(String::new()));
+            }
+        } else {
+            content = styled_lines;
+        }
+
+        let paragraph = Paragraph::new(content)
+            .block(block)
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: true });
         frame.render_widget(paragraph, area);
     }
 
@@ -2542,7 +2907,7 @@ impl Tui18App {
                     };
                     let over_limit = limit.map(|limit| stop_count > limit).unwrap_or(false);
                     let usage_style = if over_limit {
-                        Style::default().fg(Color::Yellow)
+                        Style::default().fg(self.theme.warning)
                     } else {
                         Style::default()
                     };
@@ -2568,7 +2933,12 @@ impl Tui18App {
         frame.render_widget(paragraph, area);
     }
 
-    fn render_train_purchase_modal(frame: &mut Frame, area: Rect, state: &mut PlayState) {
+    fn render_train_purchase_modal(
+        theme: &Theme,
+        frame: &mut Frame,
+        area: Rect,
+        state: &mut PlayState,
+    ) {
         let available_entries = state.available_trains();
         if available_entries.is_empty() {
             return;
@@ -2633,7 +3003,7 @@ impl Tui18App {
         let end = cmp::min(modal.offset + visible, len);
         for idx in modal.offset..end {
             let pointer = if idx == modal.cursor {
-                Span::styled("▶ ", Style::default().fg(Color::Cyan))
+                Span::styled("▶ ", Style::default().fg(theme.accent))
             } else {
                 Span::raw("  ")
             };
@@ -2738,7 +3108,7 @@ impl Tui18App {
                 for (idx, owned) in corp.trains.iter().enumerate() {
                     let is_selected = owned_focus && idx == state.owned_train_cursor();
                     let marker = if is_selected {
-                        Span::styled("▶ ", Style::default().fg(Color::Cyan))
+                        Span::styled("▶ ", Style::default().fg(self.theme.accent))
                     } else {
                         Span::raw("  ")
                     };
@@ -2792,7 +3162,7 @@ impl Tui18App {
                             };
                             let text = format!("[{}]", label);
                             let span = if Some(sidx) == active_cursor {
-                                Span::styled(text, Style::default().fg(Color::Cyan))
+                                Span::styled(text, Style::default().fg(self.theme.accent))
                             } else {
                                 Span::raw(text)
                             };
@@ -2809,7 +3179,7 @@ impl Tui18App {
                     };
                     let over_limit = limit.map(|limit| stop_count > limit).unwrap_or(false);
                     let usage_style = if over_limit {
-                        Style::default().fg(Color::Yellow)
+                        Style::default().fg(self.theme.warning)
                     } else {
                         Style::default()
                     };
@@ -2844,7 +3214,12 @@ impl Tui18App {
     fn render_banner(&self, frame: &mut Frame, area: Rect, lines: &[String]) {
         let content: Vec<Line> = lines
             .iter()
-            .map(|line| Line::from(Span::styled(line.clone(), Style::default().fg(Color::Cyan))))
+            .map(|line| {
+                Line::from(Span::styled(
+                    line.clone(),
+                    Style::default().fg(self.theme.accent),
+                ))
+            })
             .collect();
         let paragraph = Paragraph::new(content)
             .block(Block::default().borders(Borders::ALL).title("Game Title"))
@@ -3112,6 +3487,8 @@ struct PlayState {
     corporation_index: usize,
     market_cursor: (usize, usize),
     mode: PlayMode,
+    #[serde(default)]
+    title_banner_visible: bool,
     train_focus: TrainFocus,
     train_pool_cursor: usize,
     train_owned_cursor: usize,
@@ -3167,6 +3544,7 @@ impl PlayState {
             corporation_index: 0,
             market_cursor,
             mode: PlayMode::Idle,
+            title_banner_visible: true,
             train_focus: TrainFocus::Pool,
             train_pool_cursor: 0,
             train_owned_cursor: 0,
@@ -3330,6 +3708,7 @@ impl PlayState {
     }
 
     fn toggle_revenue_view(&mut self) -> bool {
+        self.title_banner_visible = false;
         self.revenue_view = !self.revenue_view;
         if self.revenue_view {
             self.ensure_phase_round_capacity(self.current_phase_index());
@@ -3524,6 +3903,14 @@ impl PlayState {
 
     fn mode(&self) -> PlayMode {
         self.mode
+    }
+
+    fn should_show_title_banner(&self) -> bool {
+        self.title_banner_visible && !self.revenue_view_enabled()
+    }
+
+    fn consume_title_banner(&mut self) {
+        self.title_banner_visible = false;
     }
 
     fn current_corporation(&self) -> Option<&Corporation> {
@@ -4361,17 +4748,17 @@ fn cell_to_position(cell: &MarketCell) -> MarketPosition {
     }
 }
 
-fn market_color(raw: &str) -> Color {
+fn market_color(raw: &str, theme: &Theme) -> Color {
     let code = raw
         .chars()
         .find(|c| c.is_ascii_alphabetic())
         .map(|c| c.to_ascii_lowercase());
     match code {
-        Some('y') => Color::Yellow,
-        Some('o') => Color::Indexed(208),
-        Some('b') => Color::Indexed(94),
-        Some('p') => Color::Indexed(250),
-        _ => Color::White,
+        Some('y') => theme.warning,
+        Some('o') => theme.accent_alt,
+        Some('b') => theme.success,
+        Some('p') => theme.muted,
+        _ => theme.primary_fg,
     }
 }
 
