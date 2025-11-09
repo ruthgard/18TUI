@@ -1,4 +1,15 @@
-use std::{cmp, collections::HashMap, env, fs, io, path::PathBuf, thread, time::Duration};
+//! Terminal UI state machine, input handling, and rendering logic.
+//!
+//! This file intentionally keeps most state in a single module so it is easy
+//! to follow how keyboard input flows into state mutations and finally into
+//! Ratatui render calls. Reading top-to-bottom mirrors that flow: theme
+//! helpers, modal types, session/play state, and finally the event loop.
+
+use std::{
+    cmp,
+    collections::{HashMap, HashSet},
+    env, fs, io, path::PathBuf, thread, time::Duration,
+};
 
 use anyhow::{anyhow, Context, Result};
 use chrono::Local;
@@ -32,9 +43,12 @@ use tui18_core::{
 
 use crate::block_font;
 
+/// Keyboard polling cadence; slower ticks mean fewer background UI updates.
 const TICK_RATE: Duration = Duration::from_millis(250);
+/// Hard limit to keep save names within file-system friendly bounds.
 const MAX_SAVE_NAME_LEN: usize = 64;
 
+/// Visual palette resolved from Omarchy themes or a built-in fallback.
 #[derive(Debug, Clone)]
 struct Theme {
     primary_bg: Color,
@@ -68,6 +82,7 @@ impl Default for Theme {
     }
 }
 
+/// Attempts to load an Omarchy color palette and returns the chosen theme plus a status blurb.
 fn load_theme() -> (Theme, String) {
     let mut theme = Theme::default();
     let candidates = omarchy_theme_candidates();
@@ -200,6 +215,7 @@ fn load_theme() -> (Theme, String) {
     (theme, summary)
 }
 
+/// Builds a prioritized list of theme file locations across common config directories.
 fn omarchy_theme_candidates() -> Vec<PathBuf> {
     let mut candidates = Vec::new();
     if let Ok(xdg) = env::var("XDG_CONFIG_HOME") {
@@ -230,6 +246,7 @@ fn omarchy_theme_candidates() -> Vec<PathBuf> {
     candidates
 }
 
+/// Walks a JSON tree using the provided key path and attempts to decode a color.
 fn color_at_path(value: &Value, path: &[&str]) -> Option<Color> {
     let mut current = value;
     for key in path {
@@ -238,6 +255,7 @@ fn color_at_path(value: &Value, path: &[&str]) -> Option<Color> {
     value_to_color(current)
 }
 
+/// Converts either a hex string or `[r,g,b]` tuple into a Ratatui color.
 fn value_to_color(value: &Value) -> Option<Color> {
     match value {
         Value::String(text) => parse_hex_color(text),
@@ -256,6 +274,7 @@ fn value_to_color(value: &Value) -> Option<Color> {
     }
 }
 
+/// Parses `#RRGGBB`/`0xRGB` style strings, tolerating a few common forms.
 fn parse_hex_color(input: &str) -> Option<Color> {
     let trimmed = input.trim();
     let hex = trimmed.strip_prefix('#').unwrap_or(trimmed);
@@ -277,6 +296,7 @@ fn parse_hex_color(input: &str) -> Option<Color> {
     }
 }
 
+/// Produces a readable foreground color for the given background using simple luminance math.
 fn contrast_color(color: &Color, fallback: Color) -> Color {
     match color {
         Color::Rgb(r, g, b) => {
@@ -292,12 +312,14 @@ fn contrast_color(color: &Color, fallback: Color) -> Color {
     }
 }
 
+/// High-level browser state: navigating vs. typing filter text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Mode {
     Browse,
     Filter,
 }
 
+/// Top-level UI screen, mirrored onto the navigation menu.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 enum Screen {
     Menu,
@@ -306,6 +328,7 @@ enum Screen {
     Play,
 }
 
+/// The section of the play screen that currently owns focus.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 enum PlayMode {
     Idle,
@@ -315,18 +338,21 @@ enum PlayMode {
     TrainRun,
 }
 
+/// Which train list is under the cursor when adjusting rosters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 enum TrainFocus {
     Owned,
     Pool,
 }
 
+/// Cursor bookkeeping for the train purchase modal.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct TrainPurchaseModal {
     cursor: usize,
     offset: usize,
 }
 
+/// Captures the temporary input buffer when the user renames a save.
 #[derive(Debug, Clone)]
 struct NamePromptModal {
     input: String,
@@ -336,6 +362,7 @@ struct NamePromptModal {
 }
 
 impl NamePromptModal {
+    /// Prefills the modal with a sensible default and places the caret at the end.
     fn new(game: GameInfo, default: String) -> Self {
         let cursor = default.len();
         Self {
@@ -346,6 +373,7 @@ impl NamePromptModal {
         }
     }
 
+    /// Moves the caret while keeping it within the string bounds.
     fn move_cursor(&mut self, delta: isize) {
         let len = self.input.len() as isize;
         let mut next = self.cursor as isize + delta;
@@ -357,14 +385,17 @@ impl NamePromptModal {
         self.cursor = next as usize;
     }
 
+    /// Jump to the beginning of the buffer.
     fn move_home(&mut self) {
         self.cursor = 0;
     }
 
+    /// Jump to the end of the buffer.
     fn move_end(&mut self) {
         self.cursor = self.input.len();
     }
 
+    /// Inserts printable ASCII at the caret if the name is not too long.
     fn insert(&mut self, ch: char) {
         if self.input.len() >= MAX_SAVE_NAME_LEN {
             return;
@@ -375,6 +406,7 @@ impl NamePromptModal {
         }
     }
 
+    /// Mirrors typical terminal backspace behaviour.
     fn backspace(&mut self) {
         if self.cursor > 0 && self.cursor <= self.input.len() {
             self.cursor -= 1;
@@ -382,12 +414,14 @@ impl NamePromptModal {
         }
     }
 
+    /// Deletes the character under the caret.
     fn delete(&mut self) {
         if self.cursor < self.input.len() {
             self.input.remove(self.cursor);
         }
     }
 
+    /// Returns the trimmed input, falling back to the default if empty.
     fn value(&self) -> String {
         let trimmed = self.input.trim();
         if trimmed.is_empty() {
@@ -398,12 +432,14 @@ impl NamePromptModal {
     }
 }
 
+/// How a corporation handles revenue from a train run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 enum RevenueAction {
     Dividend,
     Withhold,
 }
 
+/// Snapshot of a stock movement after resolving a run.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct RevenueOutcome {
     corp_sym: String,
@@ -413,6 +449,7 @@ struct RevenueOutcome {
     action: RevenueAction,
 }
 
+/// Failures that can occur when adjusting stock prices.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 enum RevenueError {
     NoCorporation,
@@ -430,6 +467,7 @@ impl std::fmt::Display for RevenueError {
     }
 }
 
+/// Tracks per-train revenue entry including cursor position and pending digits.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct TrainRunState {
     train_index: usize,
@@ -440,6 +478,7 @@ struct TrainRunState {
 }
 
 impl TrainRunState {
+    /// Creates a run state for a specific train, seeding stops with any historical values.
     fn new(train_index: usize, train_name: String, initial: Vec<i32>) -> Self {
         let base_values = if initial.is_empty() { vec![0] } else { initial };
         Self {
@@ -451,34 +490,41 @@ impl TrainRunState {
         }
     }
 
+    /// Convenience accessor used by widgets to show the highlighted stop.
     fn current_value(&self) -> i32 {
         self.values.get(self.cursor).copied().unwrap_or_default()
     }
 
+    /// Commits a value to the currently selected stop.
     fn set_current_value(&mut self, value: i32) {
         if let Some(slot) = self.values.get_mut(self.cursor) {
             *slot = value;
         }
     }
 
+    /// Buffers numeric input so the player can edit multi-digit values.
     fn append_digit(&mut self, ch: char) {
         if ch.is_ascii_digit() {
             self.input.push(ch);
         }
     }
 
+    /// Removes the last buffered digit without touching committed stops.
     fn backspace(&mut self) {
         self.input.pop();
     }
 
+    /// Returns `true` while the user is typing a number that is not yet committed.
     fn has_pending_input(&self) -> bool {
         !self.input.is_empty()
     }
 
+    /// Raw string of the buffered digits, displayed below the train table.
     fn pending_input(&self) -> &str {
         &self.input
     }
 
+    /// Parses the buffered digits and writes them onto the selected stop.
     fn commit_input(&mut self) {
         if self.input.is_empty() {
             return;
@@ -491,6 +537,7 @@ impl TrainRunState {
         self.input.clear();
     }
 
+    /// Moves between stops, clamping to the first/last entry.
     fn move_cursor(&mut self, delta: isize) {
         self.commit_input();
         if self.values.is_empty() {
@@ -507,12 +554,14 @@ impl TrainRunState {
         self.cursor = idx as usize;
     }
 
+    /// Adds a new stop after the current one.
     fn add_stop(&mut self) {
         self.commit_input();
         self.values.push(0);
         self.cursor = self.values.len() - 1;
     }
 
+    /// Deletes the highlighted stop (but always keeps at least one row).
     fn remove_stop(&mut self) {
         self.commit_input();
         if self.values.len() > 1 {
@@ -536,6 +585,7 @@ impl TrainRunState {
 }
 
 impl PhaseInfo {
+    /// Normalizes the various PHASES Ruby data shapes into a `PhaseInfo`.
     fn from_value(value: &Value) -> Self {
         match value {
             Value::String(name) => PhaseInfo {
@@ -570,6 +620,7 @@ impl PhaseInfo {
 }
 
 impl OperatingRound {
+    /// Pre-allocates a revenue slot for every corporation during the OR setup.
     fn new(corporations: usize) -> Self {
         OperatingRound {
             revenues: vec![0; corporations],
@@ -577,6 +628,7 @@ impl OperatingRound {
     }
 }
 
+/// Simplified phase metadata we need to drive the UI chips.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PhaseInfo {
     name: String,
@@ -584,11 +636,13 @@ struct PhaseInfo {
     raw: Value,
 }
 
+/// Holds per-corporation revenue values for a single OR in the current phase.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct OperatingRound {
     revenues: Vec<i32>,
 }
 
+/// Internal event enum fed by the input thread and background loader.
 enum AppEvent {
     Input(Event),
     Tick,
@@ -618,6 +672,7 @@ pub struct Tui18App {
 }
 
 impl Tui18App {
+    /// Constructs the UI facade; call `run` after wiring dependencies.
     pub fn new(
         loader: ResourceLoader,
         metadata: ResourceMetadata,
@@ -646,6 +701,8 @@ impl Tui18App {
         }
     }
 
+    /// Enters the Crossterm alternate screen, spins up background tasks, and
+    /// services events until the user exits.
     pub async fn run(&mut self) -> Result<()> {
         self.reload_games()?;
         let mut status = format!("Loaded {} games", self.state.filtered.len());
@@ -720,10 +777,12 @@ impl Tui18App {
         Ok(())
     }
 
+    /// Injects the background sync channel created by `main`.
     pub fn attach_sync(&mut self, receiver: mpsc::Receiver<SyncEvent>) {
         self.sync_rx = Some(receiver);
     }
 
+    /// Pulls fresh manifest data from the resource loader and reapplies filters.
     fn reload_games(&mut self) -> Result<()> {
         let games = self.loader.games()?;
         self.state.set_games(games);
@@ -732,6 +791,7 @@ impl Tui18App {
         Ok(())
     }
 
+    /// Periodic housekeeping work; currently only updates the filter hint.
     fn handle_tick(&mut self) {
         if self.state.mode == Mode::Filter {
             self.state
@@ -739,6 +799,7 @@ impl Tui18App {
         }
     }
 
+    /// Reacts to repo sync progress, refreshing local caches on success.
     fn handle_sync_event(&mut self, event: SyncEvent) {
         match event {
             SyncEvent::Success { path, metadata } => {
@@ -760,6 +821,7 @@ impl Tui18App {
         }
     }
 
+    /// Central dispatcher for keyboard/timer events. Returns `false` to exit `run`.
     fn process_app_event(&mut self, maybe_event: Option<AppEvent>) -> bool {
         match maybe_event {
             Some(AppEvent::Input(event)) => {
@@ -790,6 +852,7 @@ impl Tui18App {
                                 Ok(mut state) => {
                                     state.session.info = base_session.info.clone();
                                     state.session.loaded_at = base_session.loaded_at;
+                                    state.ensure_token_map();
                                     state
                                 }
                                 Err(err) => {
@@ -2393,6 +2456,7 @@ impl Tui18App {
             .corporations
             .iter()
             .map(|corp| {
+                let token = state.token_for(corp);
                 let par_text = corp
                     .par_value
                     .map(|value| format!("${value}"))
@@ -2415,7 +2479,10 @@ impl Tui18App {
                         .fg(self.theme.accent)
                         .add_modifier(Modifier::BOLD),
                 )];
-                spans.push(Span::raw(" "));
+                spans.push(Span::styled(
+                    format!(" [{token}] "),
+                    Style::default().fg(self.theme.accent_alt),
+                ));
                 spans.push(Span::styled(
                     corp.name.clone(),
                     Style::default().fg(self.theme.primary_fg),
@@ -2481,10 +2548,10 @@ impl Tui18App {
             .current_corporation()
             .and_then(|corp| corp.market_position.clone());
         // Precompute which corporations have tokens in each cell so we can overlay them while rendering.
-        let mut token_map: HashMap<(usize, usize), Vec<&Corporation>> = HashMap::new();
+        let mut cell_tokens: HashMap<(usize, usize), Vec<&Corporation>> = HashMap::new();
         for corp in &state.session.corporations {
             if let Some(pos) = &corp.market_position {
-                token_map.entry((pos.row, pos.col)).or_default().push(corp);
+                cell_tokens.entry((pos.row, pos.col)).or_default().push(corp);
             }
         }
 
@@ -2538,11 +2605,11 @@ impl Tui18App {
                     let padded = format!("{text:^width$}", text = display, width = cell_width);
                     let mut cell_spans = vec![Span::styled(padded.clone(), style)];
 
-                    if let Some(tokens) = token_map.get(&(row_idx, col_idx)) {
+                    if let Some(tokens) = cell_tokens.get(&(row_idx, col_idx)) {
                         let mut base_chars: Vec<char> = padded.chars().collect();
                         let max_tokens = cmp::min(tokens.len(), base_chars.len());
                         for (idx, corp) in tokens.iter().take(max_tokens).enumerate() {
-                            let glyph = token_glyph(corp);
+                            let glyph = state.token_for(corp);
                             if let Some(ch) = glyph.chars().next() {
                                 let replace_index = idx.min(base_chars.len().saturating_sub(1));
                                 base_chars[replace_index] = ch;
@@ -3229,6 +3296,7 @@ impl Tui18App {
     }
 }
 
+/// Reverses the Crossterm setup performed in `run`, returning the terminal to normal mode.
 fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
     disable_raw_mode().context("failed to disable raw mode")?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)
@@ -3237,6 +3305,7 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Re
     Ok(())
 }
 
+/// Dedicated blocking thread that bridges Crossterm events into the async world via a channel.
 fn spawn_input_thread(sender: mpsc::Sender<AppEvent>) {
     thread::spawn(move || loop {
         match event::poll(TICK_RATE) {
@@ -3258,6 +3327,7 @@ fn spawn_input_thread(sender: mpsc::Sender<AppEvent>) {
     });
 }
 
+/// Lightweight navigation state for the menu/browse/continue screens.
 struct UiState {
     all_games: Vec<GameInfo>,
     filtered: Vec<GameInfo>,
@@ -3470,6 +3540,7 @@ impl UiState {
     }
 }
 
+/// Case-insensitive search helper used by the filter field.
 fn game_matches(game: &GameInfo, needle: &str) -> bool {
     let candidates = [
         game.id.to_lowercase(),
@@ -3481,6 +3552,7 @@ fn game_matches(game: &GameInfo, needle: &str) -> bool {
     candidates.iter().any(|value| value.contains(needle))
 }
 
+/// Serializable chunk of UI state saved/restored between runs.
 #[derive(Clone, Serialize, Deserialize)]
 struct PlayState {
     session: GameSession,
@@ -3509,9 +3581,12 @@ struct PlayState {
     revenue_view_rows: usize,
     revenue_view_cols: usize,
     revenue_input: Option<String>,
+    #[serde(default)]
+    token_map: HashMap<String, String>,
 }
 
 impl PlayState {
+    /// Seeds the runtime state from a freshly loaded `GameSession`.
     fn new(session: GameSession) -> Self {
         let market_cursor = default_market_cursor(&session);
         let phases = if session.phases.is_empty() {
@@ -3565,9 +3640,30 @@ impl PlayState {
             revenue_view_rows: 1,
             revenue_view_cols: 1,
             revenue_input: None,
+            token_map: HashMap::new(),
         };
         state.bootstrap_revenue_from_corporations();
+        state.ensure_token_map();
         state
+    }
+
+    fn ensure_token_map(&mut self) {
+        let needs_refresh = self.token_map.len() != self.session.corporations.len()
+            || self
+                .session
+                .corporations
+                .iter()
+                .any(|corp| !self.token_map.contains_key(&corp.sym));
+        if needs_refresh {
+            self.token_map = assign_unique_tokens(&self.session.corporations);
+        }
+    }
+
+    fn token_for(&self, corp: &Corporation) -> &str {
+        self.token_map
+            .get(&corp.sym)
+            .map(|token| token.as_str())
+            .unwrap_or("?")
     }
 
     fn phase_count(&self) -> usize {
@@ -4711,6 +4807,7 @@ impl PlayState {
         }
     }
 
+    /// Returns the widest row in the market for scrolling calculations.
     fn max_market_columns(&self) -> usize {
         self.session
             .market
@@ -4720,6 +4817,7 @@ impl PlayState {
             .unwrap_or(0)
     }
 
+    /// Convenience accessor for the currently edited run and its backing corp/train.
     fn train_run_context(&self) -> Option<(&Corporation, &CorporationTrain, &TrainRunState)> {
         let run = self.train_run.as_ref()?;
         let corp = self.current_corporation()?;
@@ -4728,6 +4826,7 @@ impl PlayState {
     }
 }
 
+/// Picks an initial market cell, preferring the first par slot.
 fn default_market_cursor(session: &GameSession) -> (usize, usize) {
     if let Some(cell) = session
         .par_cells
@@ -4739,6 +4838,7 @@ fn default_market_cursor(session: &GameSession) -> (usize, usize) {
     (0, 0)
 }
 
+/// Converts UI selections into the shared `MarketPosition` struct.
 fn cell_to_position(cell: &MarketCell) -> MarketPosition {
     MarketPosition {
         row: cell.row,
@@ -4748,6 +4848,7 @@ fn cell_to_position(cell: &MarketCell) -> MarketPosition {
     }
 }
 
+/// Maps the market grid's letter codes to palette entries.
 fn market_color(raw: &str, theme: &Theme) -> Color {
     let code = raw
         .chars()
@@ -4762,16 +4863,13 @@ fn market_color(raw: &str, theme: &Theme) -> Color {
     }
 }
 
+/// Removes color codes/letters, leaving only the numeric portion of a cell.
 fn sanitize_market_text(raw: &str) -> String {
     let filtered: String = raw.chars().filter(|c| !c.is_ascii_alphabetic()).collect();
     filtered.trim().to_string()
 }
 
-fn token_glyph(corp: &Corporation) -> String {
-    let ch = corp.sym.chars().next().unwrap_or('?');
-    to_subscript(ch)
-}
-
+/// Converts raw market cell text into the human-friendly label.
 fn display_price_label(raw: &str) -> String {
     let sanitized = sanitize_market_text(raw);
     if sanitized.is_empty() {
@@ -4781,6 +4879,7 @@ fn display_price_label(raw: &str) -> String {
     }
 }
 
+/// Utility for popping modal windows directly in the centre of another rect.
 fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
     let width = width.min(area.width);
     let height = height.min(area.height);
@@ -4789,44 +4888,104 @@ fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
     Rect::new(x, y, width, height)
 }
 
+/// Formats revenue and cash values with the `$` prefix used by 18xx notation.
 fn format_currency(value: i32) -> String {
     format!("${value}")
 }
 
-fn to_subscript(ch: char) -> String {
+/// Mapping of all remaining subscript-sized glyphs we can hand out to corporations.
+const TOKEN_FALLBACKS: &[char] = &[
+    '₀', '₁', '₂', '₃', '₄', '₅', '₆', '₇', '₈', '₉', '₊', '₋', '₌', '₍', '₎', 'ₔ', 'ᵦ',
+    'ᵧ', 'ᵨ', 'ᵩ', 'ᵪ', 'ₐ', 'ₑ', 'ₒ', 'ₓ', 'ₕ', 'ₖ', 'ₗ', 'ₘ', 'ₙ', 'ₚ', 'ₛ', 'ₜ', 'ᵢ',
+    'ⱼ', 'ᵣ', 'ᵤ', 'ᵥ', '\u{1E052}', '\u{1E053}', '\u{1E054}', '\u{1E055}', '\u{1E056}',
+    '\u{1E057}', '\u{1E058}', '\u{1E059}', '\u{1E05A}', '\u{1E05B}', '\u{1E05C}', '\u{1E05D}',
+    '\u{1E05E}', '\u{1E05F}', '\u{1E060}', '\u{1E061}', '\u{1E062}', '\u{1E063}', '\u{1E064}',
+    '\u{1E065}', '\u{1E066}', '\u{1E067}', '\u{1E068}', '\u{1E069}', '\u{1E06A}',
+];
+
+fn assign_unique_tokens(corporations: &[Corporation]) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    let mut used = HashSet::new();
+    let mut fallback_iter = TOKEN_FALLBACKS.iter().copied();
+
+    for corp in corporations {
+        let mut chosen = None;
+        for candidate in preferred_token_candidates(&corp.sym) {
+            if used.insert(candidate) {
+                chosen = Some(candidate);
+                break;
+            }
+        }
+        if chosen.is_none() {
+            while let Some(candidate) = fallback_iter.next() {
+                if used.insert(candidate) {
+                    chosen = Some(candidate);
+                    break;
+                }
+            }
+        }
+        let glyph = chosen.unwrap_or('?');
+        map.insert(corp.sym.clone(), glyph.to_string());
+    }
+
+    map
+}
+
+fn preferred_token_candidates(sym: &str) -> Vec<char> {
+    let mut options = Vec::new();
+    for ch in sym.chars() {
+        if let Some(token) = subscript_char(ch) {
+            if !options.contains(&token) {
+                options.push(token);
+            }
+        }
+    }
+    options
+}
+
+fn subscript_char(ch: char) -> Option<char> {
     match ch.to_ascii_lowercase() {
-        'a' => "ₐ".to_string(),
-        'e' => "ₑ".to_string(),
-        'h' => "ₕ".to_string(),
-        'i' => "ᵢ".to_string(),
-        'j' => "ⱼ".to_string(),
-        'k' => "ₖ".to_string(),
-        'l' => "ₗ".to_string(),
-        'm' => "ₘ".to_string(),
-        'n' => "ₙ".to_string(),
-        'o' => "ₒ".to_string(),
-        'p' => "ₚ".to_string(),
-        'r' => "ᵣ".to_string(),
-        's' => "ₛ".to_string(),
-        't' => "ₜ".to_string(),
-        'u' => "ᵤ".to_string(),
-        'v' => "ᵥ".to_string(),
-        'x' => "ₓ".to_string(),
-        'y' => "ᵧ".to_string(),
-        '0' => "₀".to_string(),
-        '1' => "₁".to_string(),
-        '2' => "₂".to_string(),
-        '3' => "₃".to_string(),
-        '4' => "₄".to_string(),
-        '5' => "₅".to_string(),
-        '6' => "₆".to_string(),
-        '7' => "₇".to_string(),
-        '8' => "₈".to_string(),
-        '9' => "₉".to_string(),
-        other => other.to_lowercase().collect(),
+        'a' => Some('ₐ'),
+        'b' => Some('ᵦ'),
+        'c' => Some('ᵪ'),
+        'd' => Some('ᵨ'),
+        'e' => Some('ₑ'),
+        'f' => Some('ᵩ'),
+        'g' => Some('\u{1E054}'),
+        'h' => Some('ₕ'),
+        'i' => Some('ᵢ'),
+        'j' => Some('ⱼ'),
+        'k' => Some('ₖ'),
+        'l' => Some('ₗ'),
+        'm' => Some('ₘ'),
+        'n' => Some('ₙ'),
+        'o' => Some('ₒ'),
+        'p' => Some('ₚ'),
+        'q' => None,
+        'r' => Some('ᵣ'),
+        's' => Some('ₛ'),
+        't' => Some('ₜ'),
+        'u' => Some('ᵤ'),
+        'v' => Some('ᵥ'),
+        'w' => None,
+        'x' => Some('ₓ'),
+        'y' => Some('ᵧ'),
+        'z' => None,
+        '0' => Some('₀'),
+        '1' => Some('₁'),
+        '2' => Some('₂'),
+        '3' => Some('₃'),
+        '4' => Some('₄'),
+        '5' => Some('₅'),
+        '6' => Some('₆'),
+        '7' => Some('₇'),
+        '8' => Some('₈'),
+        '9' => Some('₉'),
+        _ => None,
     }
 }
 
+/// Human-readable form of the `distance` field on train definitions.
 fn format_distance(value: &Value) -> String {
     match value {
         Value::Null => "?".to_string(),
@@ -4842,6 +5001,7 @@ fn format_distance(value: &Value) -> String {
     }
 }
 
+/// Tries to infer how many stops a train can visit from its distance config.
 fn stop_limit_from_distance(value: &Value) -> Option<usize> {
     match value {
         Value::Number(num) => num.as_u64().map(|v| v as usize),
@@ -4852,6 +5012,7 @@ fn stop_limit_from_distance(value: &Value) -> Option<usize> {
     }
 }
 
+/// Renders the line showing per-share dividends the corporation just paid.
 fn share_payout_line(total: i32) -> String {
     if total <= 0 {
         return "Dividends: $0".to_string();

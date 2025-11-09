@@ -6,7 +6,7 @@ authors = ["Gustav Ruthgård <gustav@ruthgard.org>"]
 license = "MIT"
 
 [[bin]]
-name = "tui18"
+name = "18tui"
 path = "src/main.rs"
 
 [dependencies]

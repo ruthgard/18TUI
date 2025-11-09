@@ -1,11 +1,17 @@
+//! Lightweight ASCII-art font used for the banner/title view.
+
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
 
+/// Number of rows each glyph consumes; every rendered line maintains this height.
 const FONT_HEIGHT: usize = 6;
+/// Horizontal gap between adjacent glyphs to keep the banner legible.
 const GLYPH_SPACING: usize = 3;
 
+/// Fixed-size array describing one glyph, row by row.
 type Glyph = [&'static str; FONT_HEIGHT];
 
+/// Registry of glyph definitions keyed by uppercase character.
 static GLYPHS: Lazy<HashMap<char, Glyph>> = Lazy::new(|| {
     let mut map: HashMap<char, Glyph> = HashMap::new();
     map.insert(
@@ -452,7 +458,8 @@ static GLYPHS: Lazy<HashMap<char, Glyph>> = Lazy::new(|| {
     map
 });
 
-/// Render the provided text using the stylised banner font.
+/// Render the provided text using the stylised banner font, producing `FONT_HEIGHT`
+/// lines that can be fed straight into Ratatui paragraphs.
 pub fn render(text: &str) -> Vec<String> {
     let content: Vec<char> = text.chars().map(|c| c.to_ascii_uppercase()).collect();
     if content.is_empty() {
